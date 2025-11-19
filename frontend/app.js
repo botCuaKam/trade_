@@ -49,8 +49,8 @@ function renderBaseLayout(innerHTML) {
               </div>
             </div>
             <div class="topbar-right">
-              <div class="userpill">
-                <div class="user-avatar">${(currentUsername || "U").charAt(0).toUpperCase()}</div>
+              <div class="user-chip">
+                <div class="user-avatar">${(currentUsername || "U")[0].toUpperCase()}</div>
                 <div>
                   <div>${currentUsername || "Guest"}</div>
                   <div style="font-size:11px;color:#9ca3af;">Paper / Demo mode</div>
@@ -155,7 +155,7 @@ function renderAuthScreen(message = "") {
         }
 
         try {
-            const data = await apiRequest("/api/register-and-login", {
+            const data = await apiRequest("/api/register", {
                 method: "POST",
                 body: { username, password },
                 auth: false,
@@ -208,7 +208,7 @@ function renderSetupAccount(message = "") {
         const api_key = fd.get("api_key").trim();
         const api_secret = fd.get("api_secret").trim();
         try {
-            await apiRequest("/api/save-api-key", {
+            await apiRequest("/api/setup-account", {
                 method: "POST",
                 body: { api_key, api_secret },
             });
@@ -218,6 +218,7 @@ function renderSetupAccount(message = "") {
         }
     });
 }
+
 
 // =============== Bot Config ===============
 function renderConfigScreen(message = "") {
