@@ -1,7 +1,8 @@
-# backend/main.py
 import asyncio
 import random
 import time
+import os
+import secrets
 from typing import Dict, Optional
 
 from fastapi import (
@@ -14,22 +15,21 @@ from fastapi import (
 )
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
+
 from pydantic import BaseModel, Field
 
 from sqlalchemy import create_engine, Column, Integer, String, Float
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
-import secrets
-
-# 🚨 BOT MANAGER — bắt buộc có file trading_bot_lib.py
+# 🚨 BOT MANAGER — bắt buộc có file trading_bot_lib.py để giao dịch thật
 try:
     from trading_bot_lib import BotManager, get_balance
 except ImportError:
-    # Nếu chưa có file thật — dùng fake để chạy UI / test hệ thống
+    # Nếu thiếu lib thật thì dùng fake cho UI vẫn chạy, nhưng không trade thật
     class BotManager:
         def __init__(self, *args, **kwargs):
-            print("⚠ BOT MANAGER FAKE — UI vẫn chạy OK")
+            print("⚠ BOT MANAGER FAKE — UI vẫn chạy OK, KHÔNG giao dịch thật")
 
         def add_bot(self, **kwargs):
             print("📌 add_bot FAKE:", kwargs)
@@ -73,7 +73,10 @@ class BotConfig(Base):
     __tablename__ = "bot_configs"
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, nullable=False)
-    bot_mode = Column(String(20), nullable=False)   # static / dynamic
+
+    # tuỳ bạn đang dùng kiểu gì: 'static', 'dynamic', 'reversal', 'continuation'...
+    bot_mode = Column(String(20), nullable=False)
+
     symbol = Column(String(50), nullable=True)
     lev = Column(Integer, nullable=False)
     percent = Column(Float, nullable=False)
@@ -84,6 +87,7 @@ class BotConfig(Base):
 
 
 Base.metadata.create_all(bind=engine)
+
 
 # ==================== FASTAPI APP ====================
 app = FastAPI(title="Quan Trading Backend", version="2.0")
@@ -97,9 +101,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Serve static frontend
+app.mount(
+    "/frontend",
+    StaticFiles(directory="frontend", html=True),  # html=True để /frontend trả index.html
+    name="frontend",
+)
 
-# Serve static frontend (nếu cần)
-app.mount("/frontend", StaticFiles(directory="frontend"), name="frontend")
+
+@app.get("/")
+async def root():
+    """
+    Truy cập / sẽ trả về frontend/index.html nếu có,
+    nếu không thì redirect sang /frontend.
+    """
+    index_path = os.path.join("frontend", "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path)
+    return RedirectResponse(url="/frontend")
 
 
 # ==================== TOKEN / AUTH ====================
@@ -152,7 +171,7 @@ class SetupReq(BaseModel):
 
 
 class AddBotReq(BaseModel):
-    bot_mode: str = Field(..., description="static / dynamic")
+    bot_mode: str = Field(..., description="static / dynamic / reversal / continuation ...")
     symbol: Optional[str] = None
     lev: int
     percent: float
@@ -378,7 +397,7 @@ async def ws_price(ws: WebSocket, symbol: str = "BTCUSDT"):
     await ws.accept()
     try:
         while True:
-            # TODO: ở đây có thể gắn WebSocket Binance thật để stream giá
+            # TODO: bạn có thể thay chỗ này bằng WebSocket Binance thật
             price = 60000 + random.uniform(-1000, 1000)
             data = {
                 "symbol": symbol,
@@ -417,22 +436,26 @@ async def ws_pnl(ws: WebSocket, token: str):
         while True:
             balance = get_balance(user.api_key, user.api_secret)
             if balance is None:
-                await ws.send_json({
-                    "error": "Không lấy được số dư từ Binance",
-                    "timestamp": int(time.time())
-                })
+                await ws.send_json(
+                    {
+                        "error": "Không lấy được số dư từ Binance",
+                        "timestamp": int(time.time()),
+                    }
+                )
             else:
-                await ws.send_json({
-                    "balance": round(float(balance), 2),
-                    "timestamp": int(time.time())
-                })
+                await ws.send_json(
+                    {
+                        "balance": round(float(balance), 2),
+                        "timestamp": int(time.time()),
+                    }
+                )
             # cập nhật mỗi 5 giây để tránh spam API
             await asyncio.sleep(5)
 
     except WebSocketDisconnect:
-        print("🔌 Client đóng WebSocket")
+        print("🔌 Client đóng WebSocket /ws/pnl")
     except Exception as e:
-        print("❌ WS error:", e)
+        print("❌ WS error /ws/pnl:", e)
     finally:
         db.close()
 
@@ -440,4 +463,5 @@ async def ws_pnl(ws: WebSocket, token: str):
 # ==================== CHẠY LOCAL ====================
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True)
