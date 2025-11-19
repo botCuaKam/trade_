@@ -1,3 +1,4 @@
+# backend/main.py
 import asyncio
 import random
 import time
@@ -22,33 +23,41 @@ from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, Column, Integer, String, Float
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
-# 🚨 BOT MANAGER — bắt buộc có file trading_bot_lib.py để giao dịch thật
+# 🚨 BOT MANAGER — dùng trading_bot_lib thật nếu có
 try:
     from trading_bot_lib import BotManager, get_balance
 except ImportError:
-    # Nếu thiếu lib thật thì dùng fake cho UI vẫn chạy, nhưng không trade thật
+    # Nếu chưa có file thật — dùng fake để UI vẫn chạy, KHÔNG giao dịch thật
     class BotManager:
         def __init__(self, *args, **kwargs):
             print("⚠ BOT MANAGER FAKE — UI vẫn chạy OK, KHÔNG giao dịch thật")
 
         def add_bot(self, **kwargs):
             print("📌 add_bot FAKE:", kwargs)
+            return True
 
-        def stop_all_bots(self):
-            print("⛔ stop_all_bots FAKE")
+        def stop_all(self):
+            print("🔴 stop_all FAKE")
 
         def stop_all_coins(self):
-            print("🛑 stop_all_coins FAKE")
+            print("🔴 stop_all_coins FAKE")
 
         def stop_bot(self, bot_id):
             print(f"🔇 stop_bot {bot_id} FAKE")
 
+        def get_position_summary(self):
+            return {
+                "total_long_count": 0,
+                "total_short_count": 0,
+                "total_long_pnl": 0.0,
+                "total_short_pnl": 0.0,
+                "total_unrealized_pnl": 0.0,
+                "binance_positions": [],
+            }
+
     def get_balance(api_key, api_secret):
         """Dummy get_balance nếu thiếu trading_bot_lib thật"""
-        try:
-            return 1000.0
-        except Exception:
-            return None
+        return 1000.0
 
 
 # ==================== DATABASE ====================
@@ -74,7 +83,7 @@ class BotConfig(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, nullable=False)
 
-    # tuỳ bạn đang dùng kiểu gì: 'static', 'dynamic', 'reversal', 'continuation'...
+    # static / dynamic (khớp với frontend)
     bot_mode = Column(String(20), nullable=False)
 
     symbol = Column(String(50), nullable=True)
@@ -101,20 +110,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve static frontend
+# Serve static frontend (/frontend & /)
 app.mount(
     "/frontend",
-    StaticFiles(directory="frontend", html=True),  # html=True để /frontend trả index.html
+    StaticFiles(directory="frontend", html=True),  # /frontend → index.html
     name="frontend",
 )
 
 
 @app.get("/")
 async def root():
-    """
-    Truy cập / sẽ trả về frontend/index.html nếu có,
-    nếu không thì redirect sang /frontend.
-    """
+    """Truy cập / sẽ trả về frontend/index.html nếu có, nếu không thì redirect /frontend."""
     index_path = os.path.join("frontend", "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path)
@@ -170,62 +176,72 @@ class SetupReq(BaseModel):
     api_secret: str
 
 
-class AddBotReq(BaseModel):
-    bot_mode: str = Field(..., description="static / dynamic / reversal / continuation ...")
+class BotConfigReq(BaseModel):
+    bot_mode: str = Field(default="static", description="static / dynamic")
     symbol: Optional[str] = None
-    lev: int
-    percent: float
-    tp: float
-    sl: float
+    lev: int = 10
+    percent: float = 5.0
+    tp: float = 10.0
+    sl: float = 20.0
     roi_trigger: Optional[float] = None
     bot_count: int = 1
 
 
+# (giữ để tương thích nếu sau này dùng API khác)
+class AddBotReq(BaseModel):
+    bot_mode: str = Field(default="static")  # static / dynamic
+    symbol: Optional[str] = None
+    lev: int = 10
+    percent: float = 5
+    tp: float = 50
+    sl: float = 0
+    roi_trigger: float = 0
+    bot_count: int = 1
+
+
 # ==================== BOT MANAGER STORE ====================
-BOT_MANAGERS: Dict[int, BotManager] = {}  # user_id -> BotManager instance
+BOT_MANAGERS: Dict[int, BotManager] = {}
+
+
+def restore_bots(user: User, bm: BotManager, db: Session):
+    """Khôi phục bot từ DB vào RAM (nếu cần). Hiện tại mình chỉ dùng cấu hình + start thủ công."""
+    configs = db.query(BotConfig).filter(BotConfig.user_id == user.id).all()
+    for cfg in configs:
+        try:
+            # Nếu muốn auto start tất cả bot theo DB khi login thì bật đoạn này:
+            # bm.add_bot(
+            #     symbol=cfg.symbol,
+            #     lev=cfg.lev,
+            #     percent=cfg.percent,
+            #     tp=cfg.tp,
+            #     sl=cfg.sl,
+            #     roi_trigger=cfg.roi_trigger,
+            #     bot_mode=cfg.bot_mode,
+            #     bot_count=cfg.bot_count,
+            #     strategy_type="RSI-volume-auto",
+            # )
+            pass
+        except Exception as e:
+            print("⚠ restore_bots lỗi:", e)
 
 
 def get_bm(user: User, db: Session) -> BotManager:
-    """
-    Lấy BotManager cho user; nếu chưa có thì khởi tạo và restore bots từ DB.
-    """
+    """Lấy BotManager đã tồn tại, hoặc khởi tạo mới."""
     bm = BOT_MANAGERS.get(user.id)
     if bm is None:
         if not (user.api_key and user.api_secret):
             raise HTTPException(400, "User chưa cấu hình API Binance")
-
         bm = BotManager(api_key=user.api_key, api_secret=user.api_secret)
         BOT_MANAGERS[user.id] = bm
         restore_bots(user, bm, db)
     return bm
 
 
-def restore_bots(user: User, bm: BotManager, db: Session):
-    """
-    Đọc bot_configs trong DB và add lại vào BotManager khi app khởi động / user login.
-    """
-    configs = db.query(BotConfig).filter(BotConfig.user_id == user.id).all()
-    for cfg in configs:
-        bm.add_bot(
-            symbol=cfg.symbol,
-            lev=cfg.lev,
-            percent=cfg.percent,
-            tp=cfg.tp,
-            sl=cfg.sl,
-            roi_trigger=cfg.roi_trigger,
-            bot_id=cfg.id,
-            bot_mode=cfg.bot_mode,
-            bot_count=cfg.bot_count,
-        )
-
-
-# ==================== AUTH ENDPOINTS ====================
+# ==================== AUTH API ====================
 @app.post("/api/register")
 def register(payload: RegisterReq, db: Session = Depends(get_db)):
-    existing = db.query(User).filter(User.username == payload.username).first()
-    if existing:
-        raise HTTPException(400, detail="Tên đăng nhập đã tồn tại")
-
+    if db.query(User).filter(User.username == payload.username).first():
+        raise HTTPException(400, "Username đã tồn tại")
     user = User(username=payload.username, password=payload.password)
     db.add(user)
     db.commit()
@@ -245,7 +261,7 @@ def login(payload: LoginReq, db: Session = Depends(get_db)):
         .first()
     )
     if not user:
-        raise HTTPException(401, detail="Sai username hoặc password")
+        raise HTTPException(401, "Sai username hoặc password")
     token = create_token(user.id)
     return {"token": token, "username": user.username}
 
@@ -278,7 +294,153 @@ def setup(
     return {"ok": True}
 
 
-# ==================== SUMMARY / BOTS ====================
+# ==================== ACCOUNT STATUS (frontend dùng ở afterLogin) ====================
+@app.get("/api/account-status")
+def account_status(current: User = Depends(get_current_user)):
+    """
+    Frontend gọi /api/account-status để quyết định:
+    - configured = True => vào Dashboard
+    - configured = False => chuyển sang màn hình nhập API key
+    """
+    return {"configured": bool(current.api_key and current.api_secret)}
+
+
+# ==================== BOT CONFIG (khớp /api/bot-config của frontend) ====================
+@app.get("/api/bot-config")
+def get_bot_config(
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    cfg = (
+        db.query(BotConfig)
+        .filter(BotConfig.user_id == current.id)
+        .order_by(BotConfig.id.desc())
+        .first()
+    )
+    if not cfg:
+        # Config mặc định nếu chưa lưu gì
+        return {
+            "bot_mode": "static",
+            "symbol": "BTCUSDT",
+            "lev": 20,
+            "percent": 5.0,
+            "tp": 10.0,
+            "sl": 20.0,
+            "roi_trigger": None,
+            "bot_count": 1,
+        }
+
+    return {
+        "bot_mode": cfg.bot_mode,
+        "symbol": cfg.symbol,
+        "lev": cfg.lev,
+        "percent": cfg.percent,
+        "tp": cfg.tp,
+        "sl": cfg.sl,
+        "roi_trigger": cfg.roi_trigger,
+        "bot_count": cfg.bot_count,
+    }
+
+
+@app.post("/api/bot-config")
+def save_bot_config(
+    payload: BotConfigReq,
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    cfg = (
+        db.query(BotConfig)
+        .filter(BotConfig.user_id == current.id)
+        .order_by(BotConfig.id.desc())
+        .first()
+    )
+    if not cfg:
+        cfg = BotConfig(user_id=current.id, bot_mode=payload.bot_mode)
+        db.add(cfg)
+
+    cfg.bot_mode = payload.bot_mode
+    cfg.symbol = payload.symbol
+    cfg.lev = payload.lev
+    cfg.percent = payload.percent
+    cfg.tp = payload.tp
+    cfg.sl = payload.sl
+    cfg.roi_trigger = payload.roi_trigger
+    cfg.bot_count = payload.bot_count
+
+    db.commit()
+    db.refresh(cfg)
+    return {"ok": True}
+
+
+# ==================== BOT START / STOP / STATUS (khớp frontend) ====================
+@app.post("/api/bot-start")
+def bot_start(
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    cfg = (
+        db.query(BotConfig)
+        .filter(BotConfig.user_id == current.id)
+        .order_by(BotConfig.id.desc())
+        .first()
+    )
+    if not cfg:
+        raise HTTPException(400, "Chưa có cấu hình bot, hãy lưu config trước")
+
+    bm = get_bm(current, db)
+    ok = bm.add_bot(
+        symbol=cfg.symbol,
+        lev=cfg.lev,
+        percent=cfg.percent,
+        tp=cfg.tp,
+        sl=cfg.sl,
+        roi_trigger=cfg.roi_trigger,
+        bot_mode=cfg.bot_mode,
+        bot_count=cfg.bot_count,
+        strategy_type="RSI-volume-auto",
+    )
+    if not ok:
+        raise HTTPException(400, "Không thể khởi tạo bot, xem log server để biết chi tiết")
+    return {"ok": True}
+
+
+@app.post("/api/bot-stop")
+def bot_stop(
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    bm = get_bm(current, db)
+    # Dừng toàn bộ bot và xóa khỏi manager
+    bm.stop_all()
+    return {"ok": True}
+
+
+@app.get("/api/bot-status")
+def bot_status(
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    bm = BOT_MANAGERS.get(current.id)
+    cfg = (
+        db.query(BotConfig)
+        .filter(BotConfig.user_id == current.id)
+        .order_by(BotConfig.id.desc())
+        .first()
+    )
+
+    if not bm or not getattr(bm, "bots", None):
+        return {"running": False}
+
+    mode = cfg.bot_mode if cfg else "unknown"
+    symbol = cfg.symbol if cfg else None
+    return {
+        "running": True,
+        "mode": mode,
+        "symbol": symbol,
+    }
+
+
+# ==================== (TÙY CHỌN) CÁC API CŨ GIỮ LẠI NẾU MUỐN DÙNG THÊM ====================
 @app.get("/api/summary")
 def summary(
     current: User = Depends(get_current_user),
@@ -317,18 +479,29 @@ def get_bots(
 
 
 @app.post("/api/add-bot")
-def add_bot(
+def add_bot_old(
     payload: AddBotReq,
     current: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    """Endpoint cũ, giữ lại nếu bạn muốn quản lý nhiều bot kiểu danh sách riêng."""
     bm = get_bm(current, db)
+    bm.add_bot(
+        symbol=payload.symbol,
+        lev=payload.lev,
+        percent=payload.percent,
+        tp=payload.tp,
+        sl=payload.sl,
+        roi_trigger=payload.roi_trigger,
+        bot_mode=payload.bot_mode,
+        bot_count=payload.bot_count,
+        strategy_type="RSI-volume-auto",
+    )
 
-    # Lưu config vào DB
     cfg = BotConfig(
         user_id=current.id,
         bot_mode=payload.bot_mode,
-        symbol=payload.symbol.upper() if payload.symbol else None,
+        symbol=payload.symbol,
         lev=payload.lev,
         percent=payload.percent,
         tp=payload.tp,
@@ -340,65 +513,20 @@ def add_bot(
     db.commit()
     db.refresh(cfg)
 
-    # Thêm bot vào BotManager thật
-    bm.add_bot(
-        symbol=cfg.symbol,
-        lev=cfg.lev,
-        percent=cfg.percent,
-        tp=cfg.tp,
-        sl=cfg.sl,
-        roi_trigger=cfg.roi_trigger,
-        bot_id=cfg.id,
-        bot_mode=cfg.bot_mode,
-        bot_count=cfg.bot_count,
-    )
-
     return {"ok": True, "id": cfg.id}
 
 
-@app.post("/api/stop-bot/{bot_id}")
-def stop_bot(
-    bot_id: int,
-    current: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    bm = get_bm(current, db)
-
-    cfg = (
-        db.query(BotConfig)
-        .filter(BotConfig.id == bot_id, BotConfig.user_id == current.id)
-        .first()
-    )
-    if not cfg:
-        raise HTTPException(404, "Bot không tồn tại")
-
-    bm.stop_bot(bot_id)
-    db.delete(cfg)
-    db.commit()
-    return {"ok": True}
-
-
-@app.post("/api/stop-all-bots")
-def stop_all_bots(
-    current: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    bm = get_bm(current, db)
-    bm.stop_all_bots()
-
-    db.query(BotConfig).filter(BotConfig.user_id == current.id).delete()
-    db.commit()
-    return {"ok": True}
-
-
-# ==================== WEBSOCKET: GIÁ / PnL ====================
+# ==================== WEBSOCKET: GIÁ & PnL ====================
 @app.websocket("/ws/price")
-async def ws_price(ws: WebSocket, symbol: str = "BTCUSDT"):
+async def ws_price(ws: WebSocket, token: Optional[str] = None, symbol: str = "BTCUSDT"):
+    """
+    WebSocket giá demo. Nếu muốn, bạn có thể thay bằng WebSocket Binance thật.
+    Frontend đang gọi: /ws/price?token=...  (token ở đây không dùng đến).
+    """
     await ws.accept()
     try:
         while True:
-            # TODO: bạn có thể thay chỗ này bằng WebSocket Binance thật
-            price = 60000 + random.uniform(-1000, 1000)
+            price = round(50000 + random.uniform(-1000, 1000), 2)
             data = {
                 "symbol": symbol,
                 "price": price,
@@ -416,7 +544,7 @@ async def ws_price(ws: WebSocket, symbol: str = "BTCUSDT"):
 async def ws_pnl(ws: WebSocket, token: str):
     """
     WebSocket gửi số dư thực từ Binance Futures (thông qua trading_bot_lib.get_balance)
-    dùng token để map sang user_id trong TOKEN_STORE.
+    Frontend đang gọi: /ws/pnl?token=authToken
     """
     await ws.accept()
     db: Session = SessionLocal()
@@ -434,8 +562,8 @@ async def ws_pnl(ws: WebSocket, token: str):
             return
 
         while True:
-            balance = get_balance(user.api_key, user.api_secret)
-            if balance is None:
+            bal = get_balance(user.api_key, user.api_secret)
+            if bal is None:
                 await ws.send_json(
                     {
                         "error": "Không lấy được số dư từ Binance",
@@ -445,11 +573,11 @@ async def ws_pnl(ws: WebSocket, token: str):
             else:
                 await ws.send_json(
                     {
-                        "balance": round(float(balance), 2),
+                        "balance": round(float(bal), 2),
                         "timestamp": int(time.time()),
                     }
                 )
-            # cập nhật mỗi 5 giây để tránh spam API
+            # cập nhật 5 giây/lần để tránh spam API
             await asyncio.sleep(5)
 
     except WebSocketDisconnect:
