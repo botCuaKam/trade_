@@ -410,10 +410,27 @@ def bot_stop(
     current: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    bm = get_bm(current, db)
-    # Dừng toàn bộ bot và xóa khỏi manager
-    bm.stop_all()
+    """
+    Dừng TẤT CẢ bot của user hiện tại:
+    - Đóng toàn bộ bot (stop_all)
+    - Xóa luôn BotManager khỏi BOT_MANAGERS để chắc chắn bot_status = False
+    """
+    bm = BOT_MANAGERS.get(current.id)
+    if not bm:
+        # Không có bot nào đang chạy -> coi như đã dừng
+        return {"ok": True}
+
+    # Dừng tất cả bot trong manager
+    try:
+        bm.stop_all()
+    except Exception as e:
+        print(f"❌ Lỗi stop_all cho user {current.id}: {e}")
+
+    # Xoá hẳn BotManager khỏi bộ nhớ
+    BOT_MANAGERS.pop(current.id, None)
+
     return {"ok": True}
+
 
 
 @app.get("/api/bot-status")
@@ -421,6 +438,13 @@ def bot_status(
     current: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    """
+    Trả về trạng thái bot:
+    - running: True/False
+    - mode, symbol: đọc từ cấu hình cuối cùng
+    - bot_count: số bot trong BotManager
+    - active_symbols: danh sách các symbol bot đang chạy
+    """
     bm = BOT_MANAGERS.get(current.id)
     cfg = (
         db.query(BotConfig)
@@ -429,15 +453,36 @@ def bot_status(
         .first()
     )
 
-    if not bm or not getattr(bm, "bots", None):
-        return {"running": False}
-
     mode = cfg.bot_mode if cfg else "unknown"
     symbol = cfg.symbol if cfg else None
+
+    if not bm or not getattr(bm, "bots", None):
+        # Không có bot trong memory
+        return {
+            "running": False,
+            "mode": mode,
+            "symbol": symbol,
+            "bot_count": 0,
+            "active_symbols": [],
+        }
+
+    # Gom thông tin các bot đang chạy
+    bot_count = len(bm.bots)
+    active_symbols = []
+    try:
+        for bot in bm.bots.values():
+            syms = getattr(bot, "active_symbols", None)
+            if syms:
+                active_symbols.extend(list(syms))
+    except Exception as e:
+        print(f"⚠ Lỗi đọc active_symbols: {e}")
+
     return {
         "running": True,
         "mode": mode,
         "symbol": symbol,
+        "bot_count": bot_count,
+        "active_symbols": active_symbols,
     }
 
 
