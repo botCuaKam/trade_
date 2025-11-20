@@ -443,11 +443,18 @@ async function loadBotStatus() {
         const st = await apiRequest("/api/bot-status");
         const el = document.getElementById("bot-status-text");
         if (!el) return;
+
         if (st.running) {
-            el.textContent = `Bot đang chạy | mode: ${st.mode} | symbol: ${st.symbol || "auto"}`;
+            const botCount = st.bot_count ?? 0;
+            const syms = (st.active_symbols && st.active_symbols.length)
+                ? st.active_symbols.join(", ")
+                : (st.symbol || "auto");
+
+            el.textContent =
+                `Bot đang chạy | bots: ${botCount} | symbols: ${syms} | mode: ${st.mode}`;
             el.className = "status ok";
         } else {
-            el.textContent = "Bot đang tắt.";
+            el.textContent = `Bot đang tắt. (mode: ${st.mode}, symbol: ${st.symbol || "auto"})`;
             el.className = "status";
         }
     } catch (err) {
