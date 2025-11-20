@@ -4,6 +4,7 @@ import random
 import time
 import os
 import secrets
+import requests
 from typing import Dict, Optional
 
 from fastapi import (
@@ -520,24 +521,53 @@ def add_bot_old(
 @app.websocket("/ws/price")
 async def ws_price(ws: WebSocket, token: Optional[str] = None, symbol: str = "BTCUSDT"):
     """
-    WebSocket giá demo. Nếu muốn, bạn có thể thay bằng WebSocket Binance thật.
-    Frontend đang gọi: /ws/price?token=...  (token ở đây không dùng đến).
+    WebSocket giá realtime: backend lấy giá Futures từ Binance rồi đẩy ra frontend.
+
+    - Frontend gọi: /ws/price?token=...&symbol=BTCUSDT
+    - symbol: coin do người dùng nhập (BTCUSDT, ETHUSDT, XRPUSDT, ...)
     """
     await ws.accept()
+    symbol = (symbol or "BTCUSDT").upper()
+    print(f"📡 WS /ws/price start for symbol={symbol}")
     try:
         while True:
-            price = round(50000 + random.uniform(-1000, 1000), 2)
+            try:
+                # Gọi Binance Futures ticker
+                resp = requests.get(
+                    "https://fapi.binance.com/fapi/v1/ticker/price",
+                    params={"symbol": symbol},
+                    timeout=5,
+                )
+                resp.raise_for_status()
+                js = resp.json()
+                price = float(js.get("price", 0.0))
+            except Exception as e:
+                # Nếu lỗi, gửi message error nhẹ cho frontend rồi chờ 3s
+                print(f"❌ Binance price error for {symbol}: {e}")
+                await ws.send_json(
+                    {
+                        "error": "BINANCE_PRICE_ERROR",
+                        "message": str(e),
+                        "symbol": symbol,
+                        "timestamp": int(time.time()),
+                    }
+                )
+                await asyncio.sleep(3)
+                continue
+
             data = {
                 "symbol": symbol,
-                "price": price,
+                "price": round(price, 4),
                 "timestamp": int(time.time()),
             }
             await ws.send_json(data)
+            # cập nhật mỗi 1s ~ realtime cho biểu đồ
             await asyncio.sleep(1)
     except WebSocketDisconnect:
         print("🔌 Client đóng WebSocket /ws/price")
     except Exception as e:
         print("❌ WS error /ws/price:", e)
+
 
 
 @app.websocket("/ws/pnl")
