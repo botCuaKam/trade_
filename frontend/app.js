@@ -12,6 +12,7 @@ let priceChart = null;
 let priceData = [];
 let labelData = [];
 let ws = null;
+let currentSymbol = "BTCUSDT"; // 👈 coin đang vẽ biểu đồ
 
 // ================= API helper =================
 async function apiRequest(path, { method = "GET", body = null, auth = true } = {}) {
@@ -53,7 +54,8 @@ function renderBaseLayout(innerHTML) {
                 <div class="user-avatar">${(currentUsername || "U")[0].toUpperCase()}</div>
                 <div>
                   <div>${currentUsername || "Guest"}</div>
-                  <div style="font-size:11px;color:#9ca3af;">Paper / Demo mode</div>
+                  <div style="font-size:11px;color:#9ca3af;">Binance Futures (real, cẩn thận rủi ro)</div>
+
                 </div>
               </div>
             </div>
@@ -328,10 +330,18 @@ function renderDashboard() {
         <section class="panel">
           <div class="panel-header">
             <div>
-              <h2>Giá demo</h2>
-              <p>Giá giả lập, cập nhật qua WebSocket.</p>
+              <h2>Giá Futures realtime</h2>
+              <p>Giá Futures lấy từ Binance, chọn coin bên phải và cập nhật qua WebSocket.</p>
             </div>
             <div class="panel-actions">
+              <input
+                id="symbol-input"
+                class="input"
+                placeholder="BTCUSDT"
+                value="BTCUSDT"
+                style="width:120px;margin-right:8px;"
+              />
+              <button class="btn btn-secondary" id="btn-apply-symbol">Đổi coin</button>
               <button class="btn btn-secondary" id="btn-bot-start">Start bot</button>
               <button class="btn btn-secondary" id="btn-bot-stop">Stop bot</button>
             </div>
@@ -345,13 +355,14 @@ function renderDashboard() {
         </section>
         <section class="panel">
           <div class="panel-header">
-            <h2>PNL demo</h2>
-            <p>Số dư giả lập để test UI.</p>
+            <h2>Số dư Futures</h2>
+            <p>Số dư tài khoản Futures (availableBalance) cập nhật realtime qua WebSocket.</p>
           </div>
           <div class="panel-body">
             <div id="pnl-balance" class="pnl-balance">Loading...</div>
           </div>
         </section>
+
       </div>
     `);
 
@@ -363,7 +374,7 @@ function renderDashboard() {
             alert("Lỗi start bot: " + err.message);
         }
     });
-
+    
     document.getElementById("btn-bot-stop").addEventListener("click", async () => {
         try {
             await apiRequest("/api/bot-stop", { method: "POST" });
@@ -372,10 +383,36 @@ function renderDashboard() {
             alert("Lỗi stop bot: " + err.message);
         }
     });
-
+    
+    // 👇 THÊM MỚI
+    const symbolInput = document.getElementById("symbol-input");
+    const btnApplySymbol = document.getElementById("btn-apply-symbol");
+    if (symbolInput) {
+        symbolInput.value = currentSymbol || "BTCUSDT";
+    }
+    if (btnApplySymbol && symbolInput) {
+        btnApplySymbol.addEventListener("click", () => {
+            const sym = symbolInput.value.trim().toUpperCase();
+            if (!sym) return;
+            currentSymbol = sym;
+    
+            // reset dữ liệu chart khi đổi coin
+            priceData = [];
+            labelData = [];
+            if (priceChart) {
+                priceChart.data.labels = labelData;
+                priceChart.data.datasets[0].data = priceData;
+                priceChart.update();
+            }
+    
+            connectPriceWS(currentSymbol);
+        });
+    }
+    // 👆 HẾT PHẦN THÊM
+    
     setupSidebarEvents();
     initChart();
-    connectPriceWS();
+    connectPriceWS(currentSymbol);  // 👈 truyền currentSymbol
     connectPnlWS();
     loadBotStatus();
 }
@@ -443,7 +480,11 @@ function initChart() {
             responsive: true,
             maintainAspectRatio: false,
             interaction: { mode: "index", intersect: false },
-            plugins: { legend: { display: false } },
+            plugins: {
+              legend: { display: false },
+              title: { display: true, text: currentSymbol + " price" },
+            },
+
             scales: {
                 x: {
                     ticks: { color: "#9ca3af", maxTicksLimit: 6 },
@@ -459,30 +500,55 @@ function initChart() {
 }
 
 // =============== WebSocket ===============
-function connectPriceWS() {
+function connectPriceWS(symbol) {
+    // cập nhật symbol hiện tại (nếu người dùng nhập)
+    if (symbol) {
+        currentSymbol = symbol.toUpperCase();
+    }
+    if (!currentSymbol) {
+        currentSymbol = "BTCUSDT";
+    }
+
     if (ws) {
         ws.close();
         ws = null;
     }
+
     const url = (location.protocol === "https:" ? "wss://" : "ws://") +
         location.host +
-        `/ws/price?token=${encodeURIComponent(authToken)}`;
+        `/ws/price?token=${encodeURIComponent(authToken)}&symbol=${encodeURIComponent(currentSymbol)}`;
 
     ws = new WebSocket(url);
     ws.onopen = () => {
-        console.log("WS price connected");
+        console.log("WS price connected for", currentSymbol);
     };
     ws.onmessage = (ev) => {
         try {
             const data = JSON.parse(ev.data);
+            if (data.error) {
+                console.error("WS price error:", data);
+                return;
+            }
+
             if (priceData.length > 50) {
                 priceData.shift();
                 labelData.shift();
             }
+
             priceData.push(data.price);
             const t = new Date(data.timestamp * 1000);
-            labelData.push(`${t.getHours()}:${String(t.getMinutes()).padStart(2, "0")}:${String(t.getSeconds()).padStart(2, "0")}`);
+            labelData.push(
+              `${t.getHours()}:${String(t.getMinutes()).padStart(2, "0")}:${String(t.getSeconds()).padStart(2, "0")}`
+            );
+
             if (priceChart) {
+                if (
+                  priceChart.options &&
+                  priceChart.options.plugins &&
+                  priceChart.options.plugins.title
+                ) {
+                    priceChart.options.plugins.title.text = currentSymbol + " price";
+                }
                 priceChart.update("none");
             }
         } catch (e) {
@@ -494,6 +560,7 @@ function connectPriceWS() {
     };
 }
 
+
 function connectPnlWS() {
     const url = (location.protocol === "https:" ? "wss://" : "ws://") +
         location.host +
@@ -504,13 +571,20 @@ function connectPnlWS() {
             const data = JSON.parse(ev.data);
             const el = document.getElementById("pnl-balance");
             if (el) {
-                el.textContent = `Balance: ${data.balance.toFixed(2)} USDT`;
+                if (data.error) {
+                    el.textContent = `Lỗi: ${data.error}`;
+                } else if (typeof data.balance === "number") {
+                    el.textContent = `Balance: ${data.balance.toFixed(2)} USDT`;
+                } else {
+                    el.textContent = "Đang chờ dữ liệu số dư...";
+                }
             }
         } catch (e) {
             console.error("WS pnl parse error", e);
         }
     };
 }
+
 
 // =============== Screen routing ===============
 async function changeScreen(screen) {
